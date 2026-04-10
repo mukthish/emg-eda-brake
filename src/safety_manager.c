@@ -11,6 +11,44 @@
  *   - Fault latch          : triggered when link quality < 30
  */
 
+/*
+ * Fault detection → blocks system on bad link quality (highest priority)
+ * Fault recovery  → restores system after stable signal frames
+ * Cooldown        → prevents rapid re-trigger using time delay
+ * Threshold       → computes adaptive EMG limit from baseline
+ * EMG above       → detects intent using consecutive confirmations
+ * EMG below       → detects signal drop and triggers recovery
+ */
+
+/* confidence_counter → counts consecutive EMG-above-threshold frames; used to confirm intent (>=3 = sustained) */
+
+/* fault_latched → indicates system is in fault state (e.g., bad link); blocks all detection until stable recovery */
+
+/* cooldown_start → stores system tick when cooldown begins; used to measure cooldown duration */
+
+/* in_cooldown → flag indicating temporary blocking of detection after EMG drop to prevent rapid re-trigger */
+
+/* last_event → latest system event:
+ *   EVT_VALID_DATA       → normal state (no issue)
+ *   EVT_DATA_MISSING     → fault due to poor link quality
+ *   EVT_DATA_STABLE      → recovery from fault after stable frames
+ *   EVT_SENSOR_FAULT     → externally reported fault
+ *   EVT_EMG_ABOVE_THRESH → first EMG detection above threshold
+ *   EVT_EMG_SUSTAINED    → confirmed intent (multiple consecutive detections)
+ *   EVT_EMG_DROP         → EMG fell before confirmation (noise/false trigger)
+ *   EVT_LOW_EMG          → EMG dropped after confirmed intent (enter cooldown)
+ *   EVT_RECOVERY_COMPLETE→ cooldown finished, system ready again
+ *   EVT_EMG_RISE         → EMG rises during cooldown (early re-trigger)
+ */
+
+/* recovery_ticks → counts duration of low EMG during recovery phase to ensure stable return to idle */
+/* RECOVERY_TICKS_REQUIRED → required low-EMG ticks (~2 sec) to confirm recovery completion */
+/* stable_counter → counts consecutive good frames after fault to ensure stable signal before exiting fault */
+/* STABLE_FRAMES_REQUIRED → minimum stable frames needed to clear fault and resume normal operation */
+
+
+
+// CODE
 #include "safety_manager.h"
 #include "output_manager.h"
 #include "hal.h"
