@@ -3,40 +3,12 @@
  * @brief Supervisor / State Manager — owns system state and validates transitions.
  *
  * Owner: Mukthish
- *
- * Implements the full UML statechart from docs/uml-statecharts.md:
- *
- *   StartupSafe ──valid_data──► Idle
- *   StartupSafe ──no_data_timeout──► SoftFault
- *
- *   Idle ──emg_above_thresh──► IntentPending
- *   Idle ──data_missing/corrupt──► SoftFault
- *   Idle ──sensor_fault──► HardFault
- *
- *   IntentPending ──sustained_emg──► IntentConfirmed
- *   IntentPending ──emg_drop──► Idle
- *   IntentPending ──invalid_data──► SoftFault
- *   IntentPending ──sensor_fault──► HardFault
- *
- *   IntentConfirmed ──low_emg──► Recovery
- *   IntentConfirmed ──sensor_fault──► HardFault
- *   IntentConfirmed ──valid_data_continues──► Idle   (via Recovery)
- *   IntentConfirmed ──missing/invalid_data──► SoftFault
- *
- *   Recovery ──recovery_complete──► Idle
- *   Recovery ──emg_rise──► IntentPending
- *   Recovery ──invalid_data──► SoftFault
- *   Recovery ──sensor_fault──► HardFault
- *
- *   SoftFault ──data_stable──► Idle
- *   SoftFault ──watchdog_timeout──► StartupSafe
- *
- *   HardFault ──manual_reset──► StartupSafe
  */
 
-#include "supervisor.h"
-#include "output_manager.h"
-#include "hal.h"
+#include "../include/supervisor.h"
+#include "../include/output_manager.h"
+#include "../include/hal.h"
+#include "../include/dispatcher.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -76,6 +48,17 @@ const char *supervisor_event_name(SystemEvent e)
     return "Unknown";
 }
 
+/* ── Helper: Event Dispatcher ───────────────────────────────────────── */
+
+/** Helper to post brake actuation commands without duplicating struct logic */
+static void post_brake_cmd(int assert_brake)
+{
+    DispatchEvent ev;
+    ev.type = SYS_EVT_CMD_BRAKE;
+    ev.payload.brake_cmd = assert_brake;
+    dispatcher_post(&ev);
+}
+
 /* ── Transition helpers ─────────────────────────────────────────────── */
 
 static void enter_state(SystemState new_state)
@@ -94,20 +77,20 @@ static void enter_state(SystemState new_state)
     /* Entry actions */
     switch (new_state) {
     case STATE_INTENT_CONFIRMED:
-        output_set_brake_request(1);
+        post_brake_cmd(1);  /* EDA MODIFICATION: Dispatched instead of direct call */
         output_log_event("SUP", EVT_EMG_SUSTAINED);
         hal_led_set(2, 1);  /* Red LED = brake active */
         break;
 
     case STATE_RECOVERY:
-        output_set_brake_request(0);
+        post_brake_cmd(0);
         output_log_event("SUP", EVT_LOW_EMG);
         hal_led_set(2, 0);
         hal_led_set(3, 1);  /* Blue LED = recovery */
         break;
 
     case STATE_IDLE:
-        output_set_brake_request(0);
+        post_brake_cmd(0);
         hal_led_set(0, 1);  /* Green LED = monitoring */
         hal_led_set(1, 0);
         hal_led_set(2, 0);
@@ -115,7 +98,7 @@ static void enter_state(SystemState new_state)
         break;
 
     case STATE_SOFT_FAULT:
-        output_set_brake_request(0);
+        post_brake_cmd(0);
         soft_fault_entry_ts = hal_get_tick_ms();
         output_log_event("SUP", EVT_DATA_MISSING);
         hal_led_set(1, 1);  /* Orange LED = fault */
@@ -124,7 +107,7 @@ static void enter_state(SystemState new_state)
         break;
 
     case STATE_HARD_FAULT:
-        output_set_brake_request(0);
+        post_brake_cmd(0);
         output_log_event("SUP", EVT_SENSOR_FAULT);
         /* All LEDs blink pattern handled elsewhere */
         hal_led_set(1, 1);
@@ -132,7 +115,7 @@ static void enter_state(SystemState new_state)
         break;
 
     case STATE_STARTUP_SAFE:
-        output_set_brake_request(0);
+        post_brake_cmd(0);
         hal_led_set(0, 0);
         hal_led_set(1, 0);
         hal_led_set(2, 0);

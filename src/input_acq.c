@@ -1,19 +1,15 @@
 /**
- * @file input_acq.c
- * @brief Input Acquisition Manager — UART parsing, BLE stubs, ring buffer.
- *
  * Owner: Devansh
  *
  * Frame format (UART simulation):
- *   $EMG,EMG=0.72,EDA=0.31,TS=123456*
- *
- * BLE path is stubbed — returns "no data" until implemented.
+ * $EMG,EMG=0.72,EDA=0.31,TS=123456*
  */
 
-#include "input_acq.h"
-#include "hal.h"
-#include "output_manager.h"
-#include "supervisor.h"
+#include "../include/input_acq.h"
+#include "../include/hal.h"
+#include "../include/output_manager.h"
+#include "../include/supervisor.h"
+#include "../include/dispatcher.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -29,11 +25,6 @@
 /* ── Internal state ─────────────────────────────────────────────────── */
 
 static InputSource active_source;
-
-/* Ring buffer */
-static SampleFrame ring[INPUT_RING_SIZE];
-static int ring_head;
-static int ring_tail;
 
 /* Link health tracking */
 static int      recent_valid[LINK_HEALTH_WINDOW];
@@ -104,38 +95,15 @@ static int parse_frame(const char *raw, SampleFrame *out)
     return 1;
 }
 
-/* ── Ring buffer helpers ────────────────────────────────────────────── */
-
-static void ring_push(const SampleFrame *f)
-{
-    ring[ring_head] = *f;
-    ring_head = (ring_head + 1) & (INPUT_RING_SIZE - 1);
-    if (ring_head == ring_tail) {
-        /* Overwrite oldest */
-        ring_tail = (ring_tail + 1) & (INPUT_RING_SIZE - 1);
-    }
-}
-
-static int ring_pop(SampleFrame *f)
-{
-    if (ring_head == ring_tail) return 0;
-    *f = ring[ring_tail];
-    ring_tail = (ring_tail + 1) & (INPUT_RING_SIZE - 1);
-    return 1;
-}
-
 /* ── Public interface ───────────────────────────────────────────────── */
 
 void input_init(void)
 {
     active_source     = INPUT_SOURCE_UART;
-    ring_head         = 0;
-    ring_tail         = 0;
     health_idx        = 0;
     consecutive_errors = 0;
     last_valid_ts     = 0;
     memset(recent_valid, 0, sizeof(recent_valid));
-    memset(ring, 0, sizeof(ring));
 }
 
 void input_poll(void)
@@ -157,7 +125,13 @@ void input_poll(void)
 
         SampleFrame frame;
         if (parse_frame(buf, &frame)) {
-            ring_push(&frame);
+            
+            /* EDA MODIFICATION: Post parsed frame to dispatcher */
+            DispatchEvent ev;
+            ev.type = SYS_EVT_SAMPLES_PARSED;
+            ev.payload.frame = frame;
+            dispatcher_post(&ev);
+            
             recent_valid[health_idx % LINK_HEALTH_WINDOW] = 1;
             consecutive_errors = 0;
             last_valid_ts = hal_get_tick_ms();
@@ -180,14 +154,15 @@ void input_poll(void)
     /* Check for hard fault condition */
     if (consecutive_errors >= HARD_FAULT_ERRORS) {
         output_log_event("INP", EVT_SENSOR_FAULT);
-        supervisor_post_event(EVT_SENSOR_FAULT);
+        
+        /* EDA MODIFICATION: Send fault intent through the dispatcher */
+        DispatchEvent fault_ev;
+        fault_ev.type = SYS_EVT_INTENT_STATE;
+        fault_ev.payload.intent = EVT_SENSOR_FAULT;
+        dispatcher_post(&fault_ev);
+        
         consecutive_errors = 0;  /* Reset after posting */
     }
-}
-
-int input_fetch_samples(SampleFrame *out)
-{
-    return ring_pop(out);
 }
 
 int input_get_link_health(void)

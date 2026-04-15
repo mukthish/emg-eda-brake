@@ -3,15 +3,13 @@
  * @brief Output + Observability Manager — brake coordination and immutable logging.
  *
  * Owner: Abhishek
- *
- * Rules:
- *   - Logging is one-way append only (no feedback to control logic)
- *   - Brake actuation only via output_set_brake_request()
- *   - Sequence counter provides log integrity
  */
 
-#include "output_manager.h"
-#include "hal.h"
+#include "../include/output_manager.h"
+#include "../include/hal.h"
+/* supervisor.h is implicitly included via output_manager.h, but we can 
+ * explicitly include it here if your build system prefers explicit paths */
+#include "../include/supervisor.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -77,6 +75,8 @@ void output_log_event(const char *tag, SystemEvent evt)
     LogEntry entry;
     entry.seq       = seq_counter++;
     entry.timestamp = hal_get_tick_ms();
+    
+    /* Observability is allowed to query the global state getter */
     entry.state     = supervisor_get_state();
     entry.event     = evt;
     entry.emg_rms   = 0.0f;  /* Will be filled by caller if needed */

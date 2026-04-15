@@ -3,23 +3,11 @@
  * @brief Signal Processing + Feature Engine — filter, window, compute features.
  *
  * Owner: Mahesh
- *
- * Processing pipeline (derived from Ju et al. 2021):
- *   1. Bandpass filter  : 4th-order Butterworth, 15–90 Hz
- *      (simplified for 20 Hz sim rate — acts as high-pass above DC)
- *   2. Linear envelope  : rectification + 2nd-order Butterworth LPF @ 2 Hz
- *   3. Windowed RMS     : 1 s sliding window (SP_WINDOW_SIZE samples)
- *   4. Rate of change   : Δ RMS between successive evaluations
- *   5. Baseline model   : EWMA of quiet-state EMG
- *
- * Note: At 20 Hz simulation rate, the Nyquist limit is 10 Hz, so the
- * 15–90 Hz bandpass cannot be meaningfully applied.  For simulation we
- * apply a simple DC-removal high-pass and use the envelope directly.
- * On real hardware at 200+ Hz the full Butterworth filters should be used.
  */
 
-#include "signal_proc.h"
-#include "hal.h"
+#include "../include/signal_proc.h"
+#include "../include/hal.h"
+#include "../include/dispatcher.h"
 
 #include <math.h>
 #include <string.h>
@@ -43,24 +31,12 @@ static float prev_rms;
 
 /** Latest computed features */
 static FeatureVector latest_feat;
-static int           features_ready;
 
 /** DC removal (simple first-order high-pass) */
 static float hp_prev_raw;
 static float hp_prev_out;
 
 /** Envelope low-pass (2nd-order Butterworth at 2 Hz) */
-/*
- * For 20 Hz sample rate, cutoff = 2 Hz:
- *      wc = 2 * pi * 2 / 20 = 0.6283
- *      Prewarped: Ω = tan(wc/2) = tan(0.3142) ≈ 0.3249
- *
- *      2nd-order Butterworth:  a0 = Ω² + √2·Ω + 1
- *      b0 = Ω² / a0,   b1 = 2·b0,   b2 = b0
- *      a1 = 2·(Ω² - 1) / a0,   a2 = (Ω² - √2·Ω + 1) / a0
- *
- * Precomputed for 20 Hz / 2 Hz cutoff:
- */
 #define LPF_B0  0.0675f
 #define LPF_B1  0.1349f
 #define LPF_B2  0.0675f
@@ -136,7 +112,6 @@ void signal_proc_init(void)
     baseline_rms   = 0.0f;
     baseline_primed = 0;
     prev_rms       = 0.0f;
-    features_ready = 0;
     valid_streak   = 0;
     total_fed      = 0;
 
@@ -148,32 +123,28 @@ void signal_proc_init(void)
     memset(&latest_feat, 0, sizeof(latest_feat));
 }
 
-void signal_proc_process_batch(const SampleFrame *samples, int count)
+void signal_proc_handle_event(const SampleFrame *frame)
 {
-    for (int i = 0; i < count; i++) {
-        const SampleFrame *s = &samples[i];
-
-        if (!s->valid) {
-            valid_streak = 0;
-            continue;
-        }
-
-        valid_streak++;
-        total_fed++;
-
-        /* Pipeline: HP → rectify → LPF envelope */
-        float filtered   = highpass(s->emg);
-        float rectified  = rectify(filtered);
-        float envelope   = envelope_lpf(rectified);
-
-        /* Push into sliding window */
-        window_buf[window_idx] = envelope;
-        window_idx = (window_idx + 1) % SP_WINDOW_SIZE;
-        if (window_count < SP_WINDOW_SIZE) window_count++;
-
-        /* Smooth EDA (contextual signal) */
-        eda_smooth = 0.9f * eda_smooth + 0.1f * s->eda;
+    if (!frame->valid) {
+        valid_streak = 0;
+        return;
     }
+
+    valid_streak++;
+    total_fed++;
+
+    /* Pipeline: HP → rectify → LPF envelope */
+    float filtered   = highpass(frame->emg);
+    float rectified  = rectify(filtered);
+    float envelope   = envelope_lpf(rectified);
+
+    /* Push into sliding window */
+    window_buf[window_idx] = envelope;
+    window_idx = (window_idx + 1) % SP_WINDOW_SIZE;
+    if (window_count < SP_WINDOW_SIZE) window_count++;
+
+    /* Smooth EDA (contextual signal) */
+    eda_smooth = 0.9f * eda_smooth + 0.1f * frame->eda;
 
     /* Update features once we have a full window */
     if (window_count >= SP_WINDOW_SIZE) {
@@ -199,15 +170,12 @@ void signal_proc_process_batch(const SampleFrame *samples, int count)
             }
         }
 
-        features_ready = 1;
+        /* EDA MODIFICATION: Post extracted features to dispatcher */
+        DispatchEvent ev;
+        ev.type = SYS_EVT_FEATURES_READY;
+        ev.payload.features = latest_feat;
+        dispatcher_post(&ev);
     }
-}
-
-int signal_proc_get_features(FeatureVector *out)
-{
-    if (!features_ready) return 0;
-    *out = latest_feat;
-    return 1;
 }
 
 void signal_proc_reset_baseline(void)
