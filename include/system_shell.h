@@ -2,13 +2,13 @@
  * @file system_shell.h
  * @brief System Shell — bootstrap lifecycle and deterministic scheduler tick.
  *
- * Owner: Team
+ * The System Shell is the outermost software layer. It owns:
+ * - boot_complete flag
+ * - the 1 ms deterministic tick
  *
- * The System Shell is the outermost software layer.  It owns:
- *   - boot_complete flag
- *   - the 1 ms deterministic tick
- *
- * It delegates all control to the Supervisor after initialisation.
+ * In the Event-Driven Architecture, it no longer micromanages the pipeline.
+ * Instead, it generates a 1ms heartbeat event and commands the dispatcher
+ * to process the event queue.
  */
 
 #ifndef SYSTEM_SHELL_H
@@ -16,7 +16,7 @@
 
 /**
  * One-time system initialisation.
- * Calls hal_init() then initialises every software module in dependency order.
+ * Calls hal_init(), dispatcher_init(), and then initialises every software module.
  */
 void system_init(void);
 
@@ -24,18 +24,12 @@ void system_init(void);
  * Deterministic scheduler tick — called every 1 ms from the platform main loop
  * or SysTick ISR.
  *
- * Execution order:
- *   1. input_poll()          — acquire new UART/BLE samples
- *   2. signal_proc           — filter / feature extraction
- *   3. safety_evaluate       — intent + fault gating
- *   4. supervisor            — state transitions
- *   5. output                — brake line + logging
+ * Pushes a SYS_EVT_TICK_1MS event to the dispatcher and triggers queue evaluation.
  */
 void system_run_tick(void);
 
 /**
  * Full system reset — reinitialises all module state.
- * Returns the state machine to StartupSafe.
  */
 void system_reset(void);
 

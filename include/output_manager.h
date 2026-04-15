@@ -5,13 +5,12 @@
  * Owner: Abhishek
  *
  * Responsibilities:
- *   - Drive brake request output via HAL GPIO
- *   - Append immutable log entries (one-way, never influences control)
- *   - Maintain sequence counter for log integrity
+ * - Drive brake request output via HAL GPIO
+ * - Append immutable log entries (one-way, never influences control)
+ * - Maintain sequence counter for log integrity
  *
- * Dependency rule: logging is one-way append only.
- *   Any module → output_log_event()   (allowed)
- *   Output → any module               (forbidden)
+ * In the Event-Driven Architecture, output_set_brake_request() and 
+ * output_flush_logs() are called strictly by the central dispatcher.
  */
 
 #ifndef OUTPUT_MANAGER_H
@@ -42,6 +41,7 @@ void output_init(void);
 
 /**
  * Assert or de-assert the brake request.
+ * Handled via the SYS_EVT_CMD_BRAKE event in the dispatcher.
  * @param assert_brake  non-zero = assert, 0 = clear
  */
 void output_set_brake_request(int assert_brake);
@@ -55,7 +55,7 @@ void output_log_event(const char *tag, SystemEvent evt);
 
 /**
  * Flush buffered log entries to the platform output (hal_log).
- * Call periodically from the scheduler tick.
+ * Triggered periodically by the SYS_EVT_TICK_1MS heartbeat.
  */
 void output_flush_logs(void);
 

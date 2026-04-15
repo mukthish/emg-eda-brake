@@ -4,12 +4,9 @@
  *
  * Owner: Mukthish
  *
- * The Supervisor is the single authority for:
- *   - CurrentState
- *   - TransitionTable (UML statechart implementation)
- *   - LastTransitionTs
- *
- * No other module may own or modify system state.
+ * The Supervisor is the single authority for CurrentState and the TransitionTable.
+ * In the Event-Driven Architecture, it acts as a consumer of SYS_EVT_INTENT_STATE
+ * events and a producer of SYS_EVT_CMD_BRAKE events.
  */
 
 #ifndef SUPERVISOR_H
@@ -53,9 +50,8 @@ typedef enum {
 void supervisor_init(void);
 
 /**
- * Post an event to the state machine.
- * The supervisor evaluates the transition table and updates CurrentState
- * if a valid transition exists; otherwise the event is silently dropped.
+ * Handle intent transitions. Called by the dispatcher when a 
+ * SYS_EVT_INTENT_STATE event is pulled from the queue.
  */
 void supervisor_post_event(SystemEvent evt);
 
