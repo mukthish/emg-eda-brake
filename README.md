@@ -1,4 +1,7 @@
-# EMG-EDA Brake Intent Detection
+Here is the updated `README.md` file reflecting your new Time-Triggered Event-Driven Architecture. You can copy the raw text below directly into your project.
+
+```markdown
+# EMG-EDA Brake Intent Detection (Event-Driven Architecture)
 
 An embedded safety subsystem that detects **emergency braking intent** using calf muscle EMG (and optional EDA) signals and triggers an emergency brake request. Built as a redundant, safety-oriented intent detection channel for driver assistance.
 
@@ -8,16 +11,40 @@ An embedded safety subsystem that detects **emergency braking intent** using cal
 
 ## Architecture
 
-The firmware uses a **coordinated safety pipeline** with a central supervisor state machine:
+The firmware has been upgraded from a polled superloop to a **Time-Triggered Event-Driven Architecture (EDA)**. Modules are completely decoupled and communicate strictly via message-passing through a central Dispatcher Queue. 
 
+Execution is driven by a 1 ms hardware interrupt, which triggers a cascade of data-driven events:
+
+```text
+[1ms Hardware Tick] ──► Dispatcher (Ring Buffer Queue)
+                             │
+       ┌─────────────────────┼─────────────────────┐
+       ▼                     ▼                     ▼
+ [Input Acq]          [Signal Proc]         [Safety Manager]
+ Parses UART ───────► Extracts RMS ───────► Checks Threshold
+ (Push Samples)       (Push Features)       (Push Intent)
+                                                   │
+       ┌───────────────────────────────────────────┘
+       ▼
+  [Supervisor]
+  UML Statechart ───► [Output Manager]
+  (Push Cmd)          Asserts Brake GPIO
 ```
-Input Acquisition → Signal Processing → Safety Manager → Supervisor → Output
-    (UART/BLE)       (Filter/RMS)       (Threshold)     (State Machine)  (Brake GPIO)
-```
+
+## Working overview
+![EMG Brake Overview](images/emgbrake_overview.jpg)
+
+
+### Core Event Chain
+1. `SYS_EVT_TICK_1MS` → Prompts Input to check the UART hardware buffer.
+2. `SYS_EVT_SAMPLES_PARSED` → Triggers DSP math and sliding window updates.
+3. `SYS_EVT_FEATURES_READY` → Triggers baseline and 2.5x threshold evaluation.
+4. `SYS_EVT_INTENT_STATE` → Triggers UML state machine transitions.
+5. `SYS_EVT_CMD_BRAKE` → Triggers physical GPIO actuation.
 
 ### System States
 
-```
+```text
 StartupSafe → Idle → IntentPending → IntentConfirmed → Recovery
                 ↕                         ↕
             SoftFault                  HardFault
@@ -51,68 +78,44 @@ Derived from [Ju et al. 2021, IEEE ACCESS](https://doi.org/10.1109/ACCESS.2021.3
 
 ## Prerequisites
 
-### PC Simulator (Linux/macOS)
+### PC Simulator (Linux/macOS/Windows)
 
 - **GCC** (C11 support)
 - **Python 3** (for the stream simulator)
-- **Make**
-
-```bash
-# Ubuntu/Debian
-sudo apt install build-essential python3
-```
+- **Make** (Linux/macOS) or **Windows Batch** (`run_sim.bat`)
 
 ### STM32 Target (optional)
 
 - **arm-none-eabi-gcc** toolchain
 - STM32F4 Discovery board
 
-```bash
-# Ubuntu/Debian
-sudo apt install gcc-arm-none-eabi
-```
-
 ---
 
-## Building
-
-### PC Simulator
-
-```bash
-make sim
-```
-
-Produces `build/sim_emg_brake`.
-
-### STM32 Target
-
-```bash
-make stm32
-```
-
-Produces `build/stm32_emg_brake.elf`.
-
-### Clean
-
-```bash
-make clean
-```
-
----
-
-## Running the Simulator
+## Building & Running the Simulator
 
 The PC simulator reads UART-format EMG data frames from **stdin**. The included Python script generates simulated data and pipes it in.
 
-### Basic Usage
+### Windows (Automated Batch Script)
+Run the included batch script from your terminal or double-click it. It creates the build folder, compiles the C sources, and runs the braking scenario:
+```cmd
+run_sim.bat
+```
 
+### Linux / macOS
+Build the simulator:
+```bash
+make sim
+```
+Run the basic braking scenario:
 ```bash
 python3 tools/stream_simulator.py --scenario braking | ./build/sim_emg_brake
 ```
 
-### Simulator Options
+---
 
-```
+## Simulator Options
+
+```bash
 python3 tools/stream_simulator.py [OPTIONS]
 ```
 
@@ -121,7 +124,7 @@ python3 tools/stream_simulator.py [OPTIONS]
 | `--scenario` | `braking` | Data scenario (see below) |
 | `--duration` | `60` | Duration in seconds |
 | `--rate` | `20` | Samples per second |
-| `--serial` | — | Serial port (e.g. `/dev/ttyUSB0`) instead of stdout |
+| `--serial` | — | Serial port (e.g. `COM3` or `/dev/ttyUSB0`) |
 | `--baud` | `9600` | Baud rate for serial output |
 
 ### Scenarios
@@ -134,28 +137,18 @@ python3 tools/stream_simulator.py [OPTIONS]
 | `fault` | Malformed frames and data gaps (sensor fault injection) |
 | `full` | Cycles through all four scenarios sequentially |
 
-### Example: 30-second braking test
+---
 
-```bash
-python3 tools/stream_simulator.py --scenario braking --duration 30 | ./build/sim_emg_brake
-```
+## Reading the Output
 
-### Example: Full test suite
+Output goes to **stderr** and includes timestamped logs. Because of the EDA pipeline, notice how cascaded events trigger instantly within the same millisecond tick:
 
-```bash
-python3 tools/stream_simulator.py --scenario full --duration 60 | ./build/sim_emg_brake
-```
-
-### Reading the Output
-
-Output goes to **stderr** and includes timestamped logs:
-
-```
-[   20480] [SUP] Idle -> IntentPending              # EMG crossed threshold
-[   20600] [SUP] IntentPending -> IntentConfirmed    # 3 windows confirmed
-[   20600] [OUT] *** BRAKE ASSERTED ***              # Brake GPIO active
-[   24626] [SUP] IntentConfirmed -> Recovery         # EMG dropped
-[   24626] [OUT] brake de-asserted                   # Brake GPIO released
+```text
+[   20480] [SUP] Idle -> IntentPending               # Event: Threshold Crossed
+[   20600] [SUP] IntentPending -> IntentConfirmed    # Event: 3 Windows Confirmed
+[   20600] [OUT] *** BRAKE ASSERTED *** # Event: Brake Command Received
+[   24626] [SUP] IntentConfirmed -> Recovery         # Event: EMG Dropped
+[   24626] [OUT] brake de-asserted                   # Event: Brake Command Cleared
 ```
 
 Key log tags:
@@ -165,15 +158,6 @@ Key log tags:
 - `[INP]` — Input acquisition errors
 - `[SAF]` — Safety manager faults
 - `[LOG]` — Structured log entries
-- `[HAL-SIM]` — Simulated hardware events (GPIO, LED)
-
-### Serial Port Mode (for STM32 testing)
-
-To send data to a real STM32 over a USB-UART adapter:
-
-```bash
-python3 tools/stream_simulator.py --scenario braking --serial /dev/ttyUSB0
-```
 
 ---
 
@@ -181,7 +165,7 @@ python3 tools/stream_simulator.py --scenario braking --serial /dev/ttyUSB0
 
 The simulator outputs frames in this format:
 
-```
+```text
 $EMG,EMG=0.72,EDA=0.31,TS=123456*
 ```
 
@@ -197,21 +181,24 @@ $EMG,EMG=0.72,EDA=0.31,TS=123456*
 
 ## Project Structure
 
-```
+```text
 emg-eda-brake/
 ├── Makefile                # Build: make sim / make stm32
+├── run_sim.bat             # Automated Windows build & run script
 ├── README.md               # This file
 │
-├── include/                # Module interfaces (no HW-specific code)
+├── include/                # Module interfaces
 │   ├── hal.h               # Hardware Abstraction Layer
-│   ├── system_shell.h      # Boot + scheduler
+│   ├── dispatcher.h        # Central Event Queue Routing
+│   ├── system_shell.h      # Boot + heartbeat pacemaker
 │   ├── supervisor.h        # State machine
 │   ├── input_acq.h         # UART/BLE input
 │   ├── signal_proc.h       # Signal processing
 │   ├── safety_manager.h    # Intent + safety
 │   └── output_manager.h    # Brake + logging
 │
-├── src/                    # Core logic (platform-independent)
+├── src/                    # Core logic (Event-Driven Nodes)
+│   ├── dispatcher.c
 │   ├── system_shell.c
 │   ├── supervisor.c
 │   ├── input_acq.c
@@ -236,10 +223,11 @@ emg-eda-brake/
 
 ## Team
 
-| Member | Module |
-|--------|--------|
-| Mukthish | Supervisor / State Manager |
-| Devansh | Input Acquisition + UART/BLE |
-| Mahesh | Signal Processing + Feature Engine |
-| Bhagavath | Intent + Safety Manager |
-| Abhishek | Output + Observability + Brake Driver |
+| Member | Module | Responsibility |
+|--------|--------|----------------|
+| Mukthish | Supervisor | UML State Machine / Logic Authority |
+| Devansh | Input Acq | Data Parsing & Hardware Interfacing |
+| Mahesh | Signal Proc | DSP Filters, Windowing & Feature Extraction |
+| Bhagavath | Safety | 2.5x Dynamic Thresholding & Fault Gating |
+| Abhishek | Output | GPIO Actuation & Immutable Logging |
+```
