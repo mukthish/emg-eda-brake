@@ -132,6 +132,13 @@ void input_poll(void)
             ev.payload.frame = frame;
             dispatcher_post(&ev);
             
+            if (supervisor_get_state() == STATE_STARTUP_SAFE) {
+                DispatchEvent ev_val;
+                ev_val.type = SYS_EVT_INTENT_STATE;
+                ev_val.payload.intent = EVT_VALID_DATA;
+                dispatcher_post(&ev_val);
+            }
+            
             recent_valid[health_idx % LINK_HEALTH_WINDOW] = 1;
             consecutive_errors = 0;
             last_valid_ts = hal_get_tick_ms();
@@ -162,6 +169,19 @@ void input_poll(void)
         dispatcher_post(&fault_ev);
         
         consecutive_errors = 0;  /* Reset after posting */
+    }
+
+    /* Restore periodic link health check for timeouts */
+    static uint32_t last_health_chk = 0;
+    uint32_t tick_now = hal_get_tick_ms();
+    if (tick_now - last_health_chk >= 60) {
+        last_health_chk = tick_now;
+        if (input_get_link_health() == 0) {
+            DispatchEvent miss_ev;
+            miss_ev.type = SYS_EVT_INTENT_STATE;
+            miss_ev.payload.intent = EVT_DATA_MISSING;
+            dispatcher_post(&miss_ev);
+        }
     }
 }
 

@@ -1,6 +1,3 @@
-Here is the updated `README.md` file reflecting your new Time-Triggered Event-Driven Architecture. You can copy the raw text below directly into your project.
-
-```markdown
 # EMG-EDA Brake Intent Detection (Event-Driven Architecture)
 
 An embedded safety subsystem that detects **emergency braking intent** using calf muscle EMG (and optional EDA) signals and triggers an emergency brake request. Built as a redundant, safety-oriented intent detection channel for driver assistance.
@@ -230,4 +227,3 @@ emg-eda-brake/
 | Mahesh | Signal Proc | DSP Filters, Windowing & Feature Extraction |
 | Bhagavath | Safety | 2.5x Dynamic Thresholding & Fault Gating |
 | Abhishek | Output | GPIO Actuation & Immutable Logging |
-```

@@ -20,6 +20,7 @@ BUILD_DIR = build
 # ── Common sources (platform-independent core) ───────────────────────
 
 CORE_SRC = $(SRC_DIR)/system_shell.c \
+		   $(SRC_DIR)/dispatcher.c   \
            $(SRC_DIR)/supervisor.c   \
            $(SRC_DIR)/input_acq.c    \
            $(SRC_DIR)/signal_proc.c  \
