@@ -12,6 +12,10 @@
 #include <math.h>
 #include <string.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846f
+#endif
+
 /* ── Internal state ─────────────────────────────────────────────────── */
 
 /** Sliding window of EMG envelope values */
@@ -36,17 +40,35 @@ static FeatureVector latest_feat;
 static float hp_prev_raw;
 static float hp_prev_out;
 
-/** Envelope low-pass (2nd-order Butterworth at 2 Hz) */
-#define LPF_B0  0.0675f
-#define LPF_B1  0.1349f
-#define LPF_B2  0.0675f
-#define LPF_A1 (-1.1430f)
-#define LPF_A2  0.4128f
+/** Envelope low-pass (2nd-order Butterworth dynamically calculated) */
+static float lpf_b0, lpf_b1, lpf_b2;
+static float lpf_a1, lpf_a2;
 
 static float lpf_x1, lpf_x2;   /* past inputs  */
 static float lpf_y1, lpf_y2;   /* past outputs */
 
 /* ── Filter functions ───────────────────────────────────────────────── */
+
+/** C-equivalent of scipy.signal.butter(N=2, btype='low') */
+static void compute_lpf_coefficients(float fc, float fs)
+{
+    /* Calculate angular frequency and intermediate variables */
+    float omega_0 = 2.0f * (float)M_PI * fc / fs;
+    float cos_omega = cosf(omega_0);
+    float sin_omega = sinf(omega_0);
+    float alpha = sin_omega / (2.0f * 0.70710678f); /* Q = 1/sqrt(2) for Butterworth */
+
+    float a0 = 1.0f + alpha;
+
+    /* Feedforward coefficients (B) */
+    lpf_b0 = ((1.0f - cos_omega) / 2.0f) / a0;
+    lpf_b1 = (1.0f - cos_omega) / a0;
+    lpf_b2 = ((1.0f - cos_omega) / 2.0f) / a0;
+    
+    /* Feedback coefficients (A) */
+    lpf_a1 = (-2.0f * cos_omega) / a0;
+    lpf_a2 = (1.0f - alpha) / a0;
+}
 
 /** First-order DC-removal high-pass (alpha ≈ 0.95) */
 static float highpass(float x)
@@ -66,8 +88,8 @@ static float rectify(float x)
 /** 2nd-order Butterworth low-pass envelope filter */
 static float envelope_lpf(float x)
 {
-    float y = LPF_B0 * x + LPF_B1 * lpf_x1 + LPF_B2 * lpf_x2
-            - LPF_A1 * lpf_y1 - LPF_A2 * lpf_y2;
+    float y = lpf_b0 * x + lpf_b1 * lpf_x1 + lpf_b2 * lpf_x2
+            - lpf_a1 * lpf_y1 - lpf_a2 * lpf_y2;
 
     lpf_x2 = lpf_x1;  lpf_x1 = x;
     lpf_y2 = lpf_y1;  lpf_y1 = y;
@@ -121,6 +143,12 @@ void signal_proc_init(void)
     lpf_y1 = lpf_y2 = 0.0f;
 
     memset(&latest_feat, 0, sizeof(latest_feat));
+
+    /* Calculate filter coefficients dynamically 
+     * Cutoff Frequency (fc) = 2.0 Hz
+     * Sampling Rate (fs)    = 20.0 Hz
+     */
+    compute_lpf_coefficients(2.0f, 20.0f);
 }
 
 void signal_proc_handle_event(const SampleFrame *frame)
