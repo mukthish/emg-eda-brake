@@ -111,14 +111,14 @@ static float compute_rms(void)
 
 /* ── Quality estimator ──────────────────────────────────────────────── */
 
-static int  valid_streak;
+static int  valid_frames;
 static int  total_fed;
 
 static int estimate_quality(void)
 {
     if (total_fed < SP_WINDOW_SIZE) return 50;  /* Not enough data yet */
     /* Simple metric: ratio of valid samples in last window */
-    int q = (valid_streak * 100) / SP_WINDOW_SIZE;
+    int q = (valid_frames * 100) / SP_WINDOW_SIZE;
     if (q > 100) q = 100;
     return q;
 }
@@ -134,7 +134,7 @@ void signal_proc_init(void)
     baseline_rms   = 0.0f;
     baseline_primed = 0;
     prev_rms       = 0.0f;
-    valid_streak   = 0;
+    valid_frames   = 0;
     total_fed      = 0;
 
     hp_prev_raw = 0.0f;
@@ -153,12 +153,9 @@ void signal_proc_init(void)
 
 void signal_proc_handle_event(const SampleFrame *frame)
 {
-    if (!frame->valid) {
-        valid_streak = 0;
-        return;
+    if (frame->valid) {
+        valid_frames = (valid_frames + 1) % SP_WINDOW_SIZE;
     }
-
-    valid_streak++;
     total_fed++;
 
     /* Pipeline: HP → rectify → LPF envelope */
