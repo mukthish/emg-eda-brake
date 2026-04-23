@@ -13,46 +13,69 @@
  * $EMG,EMG=0.72,EDA=0.31,TS=123456*
  */
 
-#ifndef INPUT_ACQ_H
-#define INPUT_ACQ_H
+#include "input_acq.h"
+#include "dispatcher.h"
+#include <string.h>
+#include <stdlib.h>
 
-#include <stdint.h>
+// --- Private Ring Buffer Variables ---
+static uint8_t rx_buffer[RX_BUFFER_SIZE];
+static uint16_t head = 0;
+static uint16_t tail = 0;
 
-/* ── Data types ─────────────────────────────────────────────────────── */
+// --- Private String Parsing Variables ---
+#define MAX_FRAME_LEN 32  // Reduced since we just expect a small float like "3.141\n"
+static char frame_buffer[MAX_FRAME_LEN];
+static uint8_t frame_index = 0;
 
-/** Parsed EMG/EDA sample frame */
-typedef struct {
-    float    emg;        /**< Normalised EMG amplitude (0.0 – 1.0)  */
-    float    eda;        /**< Normalised EDA level     (0.0 – 1.0)  */
-    uint32_t timestamp;  /**< Sender timestamp (ms)                  */
-    int      valid;      /**< 1 = successfully parsed, 0 = invalid  */
-} SampleFrame;
+// ---------------------------------------------------------
+void InputAcq_Init(void) {
+    head = 0;
+    tail = 0;
+    frame_index = 0;
+}
 
-/** Input source selector */
-typedef enum {
-    INPUT_SOURCE_UART,
-    INPUT_SOURCE_BLE
-} InputSource;
+// ---------------------------------------------------------
+void InputAcq_PushChar(uint8_t data) {
+    uint16_t next_head = (head + 1) % RX_BUFFER_SIZE;
+    if (next_head != tail) {
+        rx_buffer[head] = data;
+        head = next_head;
+    }
+}
 
-/* ── Interface ──────────────────────────────────────────────────────── */
-
-/** Initialise the input subsystem (UART as default source). */
-void input_init(void);
-
-/**
- * Poll the active source for new data.
- * Call once per scheduler tick. Internally reads from HAL and
- * pushes valid frames to the central event dispatcher.
- */
-void input_poll(void);
-
-/**
- * Link health indicator.
- * @return 0–100  (100 = all recent frames valid, 0 = total link loss)
- */
-int input_get_link_health(void);
-
-/** Select the active input source (UART or BLE). */
-void input_set_source(InputSource src);
-
-#endif /* INPUT_ACQ_H */
+// ---------------------------------------------------------
+void InputAcq_Update(void) {
+    // Process all available characters in the ring buffer
+    while (tail != head) {
+        char c = (char)rx_buffer[tail];
+        tail = (tail + 1) % RX_BUFFER_SIZE;
+        
+        // --- NEW String Parsing State Machine ---
+        // If we hit a newline (\n) or carriage return (\r), the frame is done
+        if (c == '\n' || c == '\r') {
+            
+            // Only process if we actually buffered some digits
+            if (frame_index > 0) {
+                frame_buffer[frame_index] = '\0'; // Null-terminate the string
+                
+                // Convert the raw text directly to a float
+                float emg_value = (float)atof(frame_buffer);
+                
+                // Package the data and post it to the queue
+                SystemEvent evt;
+                evt.type = SYS_EVT_SAMPLES_PARSED;
+                evt.float_payload = emg_value;
+                evt.int_payload = 0;
+                Dispatcher_PostEvent(evt);
+                
+                // Reset the index for the next incoming transmission
+                frame_index = 0;
+            }
+        } 
+        else if (frame_index < (MAX_FRAME_LEN - 1)) {
+            // It's a normal character (a digit or a decimal point). Save it!
+            frame_buffer[frame_index++] = c;
+        }
+    }
+}
