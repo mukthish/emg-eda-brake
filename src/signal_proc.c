@@ -22,6 +22,7 @@
 static float window_buf[SP_WINDOW_SIZE];
 static int   window_idx;
 static int   window_count;  /**< How many samples have been added total */
+static float window_sum_sq; /**< Running sum of squares for RMS calculation */
 
 /** EDA smoothing (simple EWMA) */
 static float eda_smooth;
@@ -96,17 +97,13 @@ static float envelope_lpf(float x)
     return y;
 }
 
-/** Compute RMS over the current window buffer */
+/** Compute RMS from the running sum of squares */
 static float compute_rms(void)
 {
     int n = (window_count < SP_WINDOW_SIZE) ? window_count : SP_WINDOW_SIZE;
     if (n == 0) return 0.0f;
 
-    float sum_sq = 0.0f;
-    for (int i = 0; i < n; i++) {
-        sum_sq += window_buf[i] * window_buf[i];
-    }
-    return sqrtf(sum_sq / (float)n);
+    return sqrtf(window_sum_sq / (float)n);
 }
 
 /* ── Quality estimator ──────────────────────────────────────────────── */
@@ -130,6 +127,7 @@ void signal_proc_init(void)
     memset(window_buf, 0, sizeof(window_buf));
     window_idx     = 0;
     window_count   = 0;
+    window_sum_sq  = 0.0f;
     eda_smooth     = 0.0f;
     baseline_rms   = 0.0f;
     baseline_primed = 0;
@@ -163,8 +161,14 @@ void signal_proc_handle_event(const SampleFrame *frame)
     float rectified  = rectify(filtered);
     float envelope   = envelope_lpf(rectified);
 
-    /* Push into sliding window */
+    /* Push into sliding window with running sum update */
+    if (window_count >= SP_WINDOW_SIZE) {
+        /* Remove the square of the value being replaced */
+        window_sum_sq -= window_buf[window_idx] * window_buf[window_idx];
+    }
     window_buf[window_idx] = envelope;
+    /* Add the square of the new value */
+    window_sum_sq += envelope * envelope;
     window_idx = (window_idx + 1) % SP_WINDOW_SIZE;
     if (window_count < SP_WINDOW_SIZE) window_count++;
 
