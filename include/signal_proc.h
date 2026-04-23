@@ -19,7 +19,7 @@
 
 /* ── Configuration constants (from research paper) ──────────────────── */
 
-#define SP_WINDOW_SIZE      1000    /**< 1 s window at 20 Hz sim rate       */
+#define SP_WINDOW_SIZE      1000    /**< 1 s window sim rate       */
 #define SP_STEP_MS          60    /**< Evaluation step (paper: 60 ms)     */
 #define SP_BASELINE_ALPHA   0.01f /**< EWMA smoothing for baseline model  */
 
