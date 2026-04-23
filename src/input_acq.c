@@ -5,201 +5,69 @@
  * $EMG,EMG=0.72,EDA=0.31,TS=123456*
  */
 
-#include "../include/input_acq.h"
-#include "../include/hal.h"
-#include "../include/output_manager.h"
-#include "../include/supervisor.h"
-#include "../include/dispatcher.h"
-
+#include "input_acq.h"
+#include "dispatcher.h"
 #include <string.h>
 #include <stdlib.h>
-#include <stdio.h>
 
-/* ── Configuration ──────────────────────────────────────────────────── */
+// --- Private Ring Buffer Variables ---
+static uint8_t rx_buffer[RX_BUFFER_SIZE];
+static uint16_t head = 0;
+static uint16_t tail = 0;
 
-#define FRAME_BUF_SIZE       256
-#define LINK_HEALTH_WINDOW   20   /**< Evaluate health over last N polls   */
-#define FRAME_TIMEOUT_MS     500  /**< 500 ms = link-down threshold        */
-#define HARD_FAULT_ERRORS    20   /**< Consecutive errors → sensor fault   */
+// --- Private String Parsing Variables ---
+#define MAX_FRAME_LEN 32  // Reduced since we just expect a small float like "3.141\n"
+static char frame_buffer[MAX_FRAME_LEN];
+static uint8_t frame_index = 0;
 
-/* ── Internal state ─────────────────────────────────────────────────── */
-
-static InputSource active_source;
-
-/* Link health tracking */
-static int      recent_valid[LINK_HEALTH_WINDOW];
-static int      health_idx;
-static int      consecutive_errors;
-static uint32_t last_valid_ts;
-
-/* ── BLE stub ───────────────────────────────────────────────────────── */
-
-/**
- * Poll a BLE packet from the OpenBCI Cyton.
- * TODO: implement real BLE protocol parsing.
- * @return 0 always (no data available)
- */
-static int ble_poll_packet(char *buf, int max_len)
-{
-    (void)buf;
-    (void)max_len;
-    return 0;   /* No BLE data — stub */
+// ---------------------------------------------------------
+void InputAcq_Init(void) {
+    head = 0;
+    tail = 0;
+    frame_index = 0;
 }
 
-/* ── Frame parser ───────────────────────────────────────────────────── */
-
-/**
- * Parse a UART frame string into a SampleFrame.
- *
- * Expected format:  $EMG,EMG=0.72,EDA=0.31,TS=123456*
- *
- * @param raw   null-terminated frame string
- * @param out   destination SampleFrame
- * @return      1 if parsed successfully, 0 on error
- */
-static int parse_frame(const char *raw, SampleFrame *out)
-{
-    out->valid = 0;
-    out->emg   = 0.0f;
-    out->eda   = 0.0f;
-    out->timestamp = 0;
-
-    /* Check start/end delimiters */
-    if (raw[0] != '$') return 0;
-
-    const char *end = strchr(raw, '*');
-    if (!end) return 0;
-
-    /* Find EMG= */
-    const char *emg_ptr = strstr(raw, "EMG=");
-    if (!emg_ptr) return 0;
-    out->emg = (float)atof(emg_ptr + 4);
-
-    /* Find EDA= (optional) */
-    const char *eda_ptr = strstr(raw, "EDA=");
-    if (eda_ptr) {
-        out->eda = (float)atof(eda_ptr + 4);
+// ---------------------------------------------------------
+void InputAcq_PushChar(uint8_t data) {
+    uint16_t next_head = (head + 1) % RX_BUFFER_SIZE;
+    if (next_head != tail) {
+        rx_buffer[head] = data;
+        head = next_head;
     }
-
-    /* Find TS= */
-    const char *ts_ptr = strstr(raw, "TS=");
-    if (ts_ptr) {
-        out->timestamp = (uint32_t)atol(ts_ptr + 3);
-    }
-
-    /* Basic range validation */
-    if (out->emg < -10.0f || out->emg > 10.0f) return 0;
-    if (out->eda < -10.0f || out->eda > 10.0f) return 0;
-
-    out->valid = 1;
-    return 1;
 }
 
-/* ── Public interface ───────────────────────────────────────────────── */
-
-void input_init(void)
-{
-    active_source     = INPUT_SOURCE_UART;
-    health_idx        = 0;
-    consecutive_errors = 0;
-    last_valid_ts     = 0;
-    memset(recent_valid, 0, sizeof(recent_valid));
-}
-
-void input_poll(void)
-{
-    char buf[FRAME_BUF_SIZE];
-    int  bytes = 0;
-
-    switch (active_source) {
-    case INPUT_SOURCE_UART:
-        bytes = hal_uart_read_frame(buf, FRAME_BUF_SIZE);
-        break;
-    case INPUT_SOURCE_BLE:
-        bytes = ble_poll_packet(buf, FRAME_BUF_SIZE);
-        break;
-    }
-
-    if (bytes > 0) {
-        buf[bytes < FRAME_BUF_SIZE ? bytes : FRAME_BUF_SIZE - 1] = '\0';
-
-        SampleFrame frame;
-        if (parse_frame(buf, &frame)) {
+// ---------------------------------------------------------
+void InputAcq_Update(void) {
+    // Process all available characters in the ring buffer
+    while (tail != head) {
+        char c = (char)rx_buffer[tail];
+        tail = (tail + 1) % RX_BUFFER_SIZE;
+        
+        // --- NEW String Parsing State Machine ---
+        // If we hit a newline (\n) or carriage return (\r), the frame is done
+        if (c == '\n' || c == '\r') {
             
-            /* EDA MODIFICATION: Post parsed frame to dispatcher */
-            DispatchEvent ev;
-            ev.type = SYS_EVT_SAMPLES_PARSED;
-            ev.payload.frame = frame;
-            dispatcher_post(&ev);
-            
-            if (supervisor_get_state() == STATE_STARTUP_SAFE) {
-                DispatchEvent ev_val;
-                ev_val.type = SYS_EVT_INTENT_STATE;
-                ev_val.payload.intent = EVT_VALID_DATA;
-                dispatcher_post(&ev_val);
+            // Only process if we actually buffered some digits
+            if (frame_index > 0) {
+                frame_buffer[frame_index] = '\0'; // Null-terminate the string
+                
+                // Convert the raw text directly to a float
+                float emg_value = (float)atof(frame_buffer);
+                
+                // Package the data and post it to the queue
+                SystemEvent evt;
+                evt.type = SYS_EVT_SAMPLES_PARSED;
+                evt.float_payload = emg_value;
+                evt.int_payload = 0;
+                Dispatcher_PostEvent(evt);
+                
+                // Reset the index for the next incoming transmission
+                frame_index = 0;
             }
-            
-            recent_valid[health_idx % LINK_HEALTH_WINDOW] = 1;
-            consecutive_errors = 0;
-            last_valid_ts = hal_get_tick_ms();
-        } else {
-            /* Malformed frame */
-            recent_valid[health_idx % LINK_HEALTH_WINDOW] = 0;
-            consecutive_errors++;
-            output_log_event("INP", EVT_DATA_INVALID);
-        }
-        health_idx++;
-    } else {
-        /* No data this tick — check timeout */
-        uint32_t now = hal_get_tick_ms();
-        if (last_valid_ts > 0 && (now - last_valid_ts) >= FRAME_TIMEOUT_MS) {
-            recent_valid[health_idx % LINK_HEALTH_WINDOW] = 0;
-            health_idx++;
+        } 
+        else if (frame_index < (MAX_FRAME_LEN - 1)) {
+            // It's a normal character (a digit or a decimal point). Save it!
+            frame_buffer[frame_index++] = c;
         }
     }
-
-    /* Check for hard fault condition */
-    if (consecutive_errors >= HARD_FAULT_ERRORS) {
-        output_log_event("INP", EVT_SENSOR_FAULT);
-        
-        /* EDA MODIFICATION: Send fault intent through the dispatcher */
-        DispatchEvent fault_ev;
-        fault_ev.type = SYS_EVT_INTENT_STATE;
-        fault_ev.payload.intent = EVT_SENSOR_FAULT;
-        dispatcher_post(&fault_ev);
-        
-        consecutive_errors = 0;  /* Reset after posting */
-    }
-
-    /* Restore periodic link health check for timeouts */
-    static uint32_t last_health_chk = 0;
-    uint32_t tick_now = hal_get_tick_ms();
-    if (tick_now - last_health_chk >= 60) {
-        last_health_chk = tick_now;
-        if (input_get_link_health() == 0) {
-            DispatchEvent miss_ev;
-            miss_ev.type = SYS_EVT_INTENT_STATE;
-            miss_ev.payload.intent = EVT_DATA_MISSING;
-            dispatcher_post(&miss_ev);
-        }
-    }
-}
-
-int input_get_link_health(void)
-{
-    int valid_count = 0;
-    for (int i = 0; i < LINK_HEALTH_WINDOW; i++) {
-        valid_count += recent_valid[i];
-    }
-    return (valid_count * 100) / LINK_HEALTH_WINDOW;
-}
-
-void input_set_source(InputSource src)
-{
-    active_source = src;
-    consecutive_errors = 0;
-    char msg[64];
-    snprintf(msg, sizeof(msg), "[INP] source changed to %s",
-             src == INPUT_SOURCE_BLE ? "BLE" : "UART");
-    hal_log(msg);
 }
