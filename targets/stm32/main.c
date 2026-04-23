@@ -1,155 +1,210 @@
-/**
- * @file targets/stm32/main.c
- * @brief STM32F4 entry point — configures clocks, GPIO, UART, and SysTick.
- *
- * Adapted from docs/main.c reference implementation.
- *
- * SysTick is configured for a 1 ms interrupt that calls system_run_tick().
- * The main loop is idle — all work happens in the SysTick ISR.
- */
-
 #include "stm32f4xx.h"
-#include "system_shell.h"
-#include "hal.h"
-
-/* ── Forward declarations ───────────────────────────────────────────── */
+#include "input_acq.h"
+#include "safety_manager.h"
+#include "dispatcher.h"
+#include "supervisor.h"
+#include "output_mgr.h"
+#include "logger.h"
 
 void SystemClock_Config(void);
 void GPIO_Init(void);
 void USART1_Init(void);
 void SysTick_Init(void);
+void Watchdog_Init(void);
+void Watchdog_Feed(void);
 
-/* ── Main ───────────────────────────────────────────────────────────── */
+// --- GLOBAL TIME COUNTER ---
+// Must be volatile because it is modified inside an ISR
+static volatile uint32_t system_time_ms = 0;
 
-int main(void)
-{
-    /* 1. Platform hardware initialisation */
-    SystemClock_Config();
-    GPIO_Init();
-    USART1_Init();
+// Getter function so other modules can read the time safely
+uint32_t GetSystemTime(void) {
+    return system_time_ms;
+}
+
+// --- INTENT FLAG ---
+// Set this to 1 in your algorithm module (e.g., dispatcher.c) when a brake intent is detected.
+volatile uint8_t brake_intent_flag = 0; 
+
+int main(void) {
+    
+    SystemClock_Config(); 
+    GPIO_Init();          
+    USART1_Init();        
+    InputAcq_Init();
+    SafetyManager_Init();
+    Dispatcher_Init();
+    Supervisor_Init();
+    OutputMgr_Init();
+    Logger_Init();
     SysTick_Init();
+    
+    // Initialize the hardware watchdog timer (~1 second timeout)
+    Watchdog_Init();
 
-    /* 2. Firmware initialisation */
-    system_init();
-
-    /* 3. Main loop — idle, all work in SysTick_Handler */
+    // Variables for non-blocking LED timer
+    uint32_t green_led_start_time = 0;
+    uint8_t is_intent_active = 0;
+    
     while (1) {
-        __asm volatile ("wfi");  /* Wait For Interrupt — power saving */
-    }
-}
+        // 1. FEED THE WATCHDOG
+        // If the system hangs and this isn't called within ~1 second, the board resets.
+        Watchdog_Feed();
 
-/* ── SysTick Handler (1 ms) ─────────────────────────────────────────── */
-
-void SysTick_Handler(void)
-{
-    system_run_tick();
-}
-
-/* ── USART1 ISR (receive interrupt) ─────────────────────────────────── */
-
-/* RX ring buffer for ISR → hal_uart_read_frame handoff */
-#define UART_RX_RING_SIZE  512
-
-static volatile uint8_t  uart_rx_ring[UART_RX_RING_SIZE];
-static volatile uint32_t uart_rx_head = 0;
-static volatile uint32_t uart_rx_tail = 0;
-
-void USART1_IRQHandler(void)
-{
-    if (USART1->SR & USART_SR_RXNE) {
-        uint8_t ch = (uint8_t)(USART1->DR & 0xFF);
-        uint32_t next = (uart_rx_head + 1) % UART_RX_RING_SIZE;
-        if (next != uart_rx_tail) {
-            uart_rx_ring[uart_rx_head] = ch;
-            uart_rx_head = next;
+        // 2. RUN SYSTEM TASKS
+        InputAcq_Update();
+        Dispatcher_ProcessQueue();
+                
+        // 3. CHECK FOR BRAKE INTENT (TRIGGER)
+        if (brake_intent_flag == 1) {
+            brake_intent_flag = 0;             // Reset the flag immediately
+            GPIOD->ODR |= (1ul << 12);         // Turn ON Green LED (PD12)
+            green_led_start_time = GetSystemTime(); // Record the exact time
+            is_intent_active = 1;              // Mark the intent as active
         }
-        /* else: ring full — drop byte (safer than blocking in ISR) */
+
+        // 4. CHECK LED TIMER (500ms TIMEOUT)
+        if (is_intent_active && ((GetSystemTime() - green_led_start_time) >= 500)) {
+            GPIOD->ODR &= ~(1ul << 12);        // Turn OFF Green LED (PD12)
+            is_intent_active = 0;              // Reset active state
+        }
     }
 }
 
-/* ── Accessor for hal_stm32.c ───────────────────────────────────────── */
+// --- WATCHDOG FUNCTIONS ---
 
-int stm32_uart_rx_available(void)
-{
-    return uart_rx_head != uart_rx_tail;
+void Watchdog_Init(void) {
+    // 1. Enable write access to IWDG_PR and IWDG_RLR registers
+    IWDG->KR = 0x5555;  			// KR -> Key Register
+    
+    // 2. Set prescaler to 32. 
+    // The LSI clock is ~32kHz. 32000 / 32 = 1000 Hz (1 tick per millisecond)
+    IWDG->PR = 0x03; 					// PR -> Prescaler Register
+    
+    // 3. Set reload value. For ~1000ms (1 second), set to 1000.
+    IWDG->RLR = 1000;					// RLR -> Reload Register
+    
+    // 4. Reload the counter to apply the values
+    IWDG->KR = 0xAAAA;
+    
+    // 5. Start the watchdog (Starts the LSI [Low Speed Clock] automatically)
+    IWDG->KR = 0xCCCC;
 }
 
-uint8_t stm32_uart_rx_read(void)
-{
-    if (uart_rx_head == uart_rx_tail) return 0;
-    uint8_t ch = uart_rx_ring[uart_rx_tail];
-    uart_rx_tail = (uart_rx_tail + 1) % UART_RX_RING_SIZE;
-    return ch;
+void Watchdog_Feed(void) {
+    // Reloads the IWDG counter back to 1000 to prevent a system reset
+    IWDG->KR = 0xAAAA; 
 }
 
-/* ── Hardware initialisation ────────────────────────────────────────── */
+// --- ISR AND PERIPHERAL INITS ---
 
-void SystemClock_Config(void)
-{
-    /* HSE on, wait ready */
-    RCC->CR |= RCC_CR_HSEON;
-    while (!(RCC->CR & RCC_CR_HSERDY));
+void USART1_IRQHandler(void) {
+    // 1. Check for and clear Overrun Errors (ORE) to prevent freezing
+    if (USART1->SR & USART_SR_ORE) {
+        // Clearing ORE requires reading SR, then reading DR
+        volatile uint32_t dummy = USART1->SR;
+        dummy = USART1->DR;
+        (void)dummy; 
+    }
 
-    /* Power controller */
-    RCC->APB1ENR |= RCC_APB1ENR_PWREN;
-    PWR->CR |= PWR_CR_VOS;
-
-    /* Flash: prefetch, I-cache, D-cache, 5 wait states for 168 MHz */
-    FLASH->ACR = FLASH_ACR_ICEN | FLASH_ACR_DCEN | FLASH_ACR_PRFTEN
-               | FLASH_ACR_LATENCY_5WS;
-
-    /* PLL: HSE/8 * 336 / 2 = 168 MHz */
-    RCC->PLLCFGR = (8UL) | (336UL << 6) | (0UL << 16)
-                 | RCC_PLLCFGR_PLLSRC_HSE | (7UL << 24);
-
-    RCC->CR |= RCC_CR_PLLON;
-    while (!(RCC->CR & RCC_CR_PLLRDY));
-
-    /* Bus prescalers: AHB/1, APB1/4 (42 MHz), APB2/2 (84 MHz) */
-    RCC->CFGR |= RCC_CFGR_HPRE_DIV1 | RCC_CFGR_PPRE1_DIV4
-               | RCC_CFGR_PPRE2_DIV2;
-
-    /* Switch to PLL */
-    RCC->CFGR |= RCC_CFGR_SW_PLL;
-    while ((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_PLL);
+    // 2. Process normal incoming data
+    if (USART1->SR & USART_SR_RXNE) {
+        uint8_t received_data = USART1->DR; 
+        InputAcq_PushChar(received_data);
+    }
 }
 
-void GPIO_Init(void)
-{
-    /* Enable GPIOD clock */
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIODEN;
+void SysTick_Handler(void) {
+    // 1. Increment global time
+    system_time_ms++;
 
-    /* PD12-PD15 as output (LEDs + brake on PD12) */
-    GPIOD->MODER &= ~((3UL<<24) | (3UL<<26) | (3UL<<28) | (3UL<<30));
-    GPIOD->MODER |=  ((1UL<<24) | (1UL<<26) | (1UL<<28) | (1UL<<30));
+    // 2. Drive the Supervisor's recovery cooldown timer
+    Supervisor_Tick1ms();
+    
+    // 3. Drive the Blue LED (PD15) Heartbeat every 500ms
+    static uint16_t heartbeat_timer = 0;
+    heartbeat_timer++;
+    
+    if (heartbeat_timer >= 500) {
+        heartbeat_timer = 0;
+        GPIOD->ODR ^= (1ul << 15); 
+    }
 }
 
-void USART1_Init(void)
-{
-    /* Enable GPIOA + USART1 clocks */
-    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+void USART1_Init(void) {
+    // 1. Enable clocks for GPIOB (not GPIOA) and USART1
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
     RCC->APB2ENR |= RCC_APB2ENR_USART1EN;
-
-    /* PA9(TX) + PA10(RX) → AF7 */
-    GPIOA->MODER &= ~((3UL << 18) | (3UL << 20));
-    GPIOA->MODER |=  ((2UL << 18) | (2UL << 20));
-    GPIOA->AFR[1] |= (7UL << 4) | (7UL << 8);
-
-    /* Baud 9600: APB2=84 MHz → BRR = 84M / (16*9600) ≈ 546.875 → 0x222E */
-    USART1->BRR = 0x222E;
-
-    /* Enable USART, TX, RX, RXNE interrupt */
-    USART1->CR1 = USART_CR1_UE | USART_CR1_TE | USART_CR1_RE
-                | USART_CR1_RXNEIE;
-
+    
+    // 2. Configure PB6 (TX) and PB7 (RX) for Alternate Function 7
+    GPIOB->MODER &= ~((3ul << 12) | (3ul << 14)); // Clear bits 12-15
+    GPIOB->MODER |= ((2ul << 12) | (2ul << 14));  // Set to AF mode (10 in binary)
+    
+    // Use AFR[0] (AFRL) because pins 6 and 7 are in the lower half (0-7)
+    GPIOB->AFR[0] |= (7ul << 24) | (7ul << 28); 
+    
+    // 3. Set Baud Rate to 115200
+    USART1->BRR = 0x02D9;
+    
+    // 4. Enable USART, TX, RX, and the RXNE (Read Data Register Not Empty) Interrupt
+    USART1->CR1 = USART_CR1_UE | USART_CR1_TE | USART_CR1_RE | USART_CR1_RXNEIE;
+    
+    // 5. Enable the USART1 Interrupt in the core ARM NVIC
     NVIC_EnableIRQ(USART1_IRQn);
 }
 
-void SysTick_Init(void)
-{
-    /* 168 MHz / 1000 = 168000 ticks per 1 ms */
-    SysTick->LOAD = 168000 - 1;
-    SysTick->VAL  = 0;
-    SysTick->CTRL = SysTick_CTRL_ENABLE | SysTick_CTRL_TICKINT
-                  | SysTick_CTRL_CLKSOURCE;
+// Configures the system clock to 168 MHz using the 8 MHz HSE crystal
+void SystemClock_Config(void) {
+    // 1. Enable HSE and wait for it to be ready
+    RCC->CR |= RCC_CR_HSEON;
+    while (!(RCC->CR & RCC_CR_HSERDY));
+
+    // 2. Set Power Enable Clock and Voltage Regulator
+    RCC->APB1ENR |= RCC_APB1ENR_PWREN;
+    PWR->CR |= PWR_CR_VOS;
+
+    // 3. Configure Flash prefetch, Instruction cache, Data cache, and wait states (5 WS for 168 MHz)
+    FLASH->ACR = FLASH_ACR_ICEN | FLASH_ACR_DCEN | FLASH_ACR_PRFTEN | FLASH_ACR_LATENCY_5WS;
+
+    // 4. Configure the Main PLL
+    RCC->PLLCFGR = (8ul) | (336ul << 6) | (0ul << 16) | RCC_PLLCFGR_PLLSRC_HSE | (7ul << 24);
+
+    // 5. Enable the Main PLL and wait for it to be ready
+    RCC->CR |= RCC_CR_PLLON;
+    while (!(RCC->CR & RCC_CR_PLLRDY));
+
+    // 6. Configure AHB/APB prescalers
+    // FIRST: Clear the old prescaler bits
+    RCC->CFGR &= ~(RCC_CFGR_HPRE | RCC_CFGR_PPRE1 | RCC_CFGR_PPRE2); 
+    // SECOND: Set your new prescaler bits
+    RCC->CFGR |= RCC_CFGR_HPRE_DIV1 | RCC_CFGR_PPRE1_DIV4 | RCC_CFGR_PPRE2_DIV2;
+            
+    // 7. Select the main PLL as system clock source and wait for it to be used
+    RCC->CFGR |= RCC_CFGR_SW_PLL; 			// SW -> System Clock Switch
+    while ((RCC->CFGR & RCC_CFGR_SWS) != RCC_CFGR_SWS_PLL);				// SWS -> System Clock Switch Status
+}
+
+// Configures PD12, PD13, PD14, PD15 as general purpose output
+void GPIO_Init(void) {
+    // Enable GPIOD clock on AHB1
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIODEN;
+    
+    GPIOD->MODER &= ~((3ul<<24) | (3ul<<26) | (3ul<<28) | (3ul<<30));
+    GPIOD->MODER |= ((1ul<<24) | (1ul<<26) | (1ul<<28) | (1ul<<30));
+    
+}
+
+// Configures the ARM SysTick timer to trigger an interrupt every 1 ms
+void SysTick_Init(void) {
+    // 1. Program the Reload Register with the calculated value
+    SysTick->LOAD = 168000 - 1; 
+    
+    // 2. Clear the Current Value register
+    SysTick->VAL = 0;
+    
+    // 3. Enable SysTick, enable the interrupt, and choose the processor clock
+    // Bit 0 = ENABLE, Bit 1 = TICKINT, Bit 2 = CLKSOURCE
+    SysTick->CTRL = SysTick_CTRL_CLKSOURCE_Msk | 
+                    SysTick_CTRL_TICKINT_Msk | 
+                    SysTick_CTRL_ENABLE_Msk;
 }
